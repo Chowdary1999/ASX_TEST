@@ -128,7 +128,6 @@ exports.handler = async (event) => {
         return json({ picks: top3 });
       }
 
-      // fn === 'pick' (best single)
       const top = ranked[0];
       if (!top) return json({ error: 'No candidates found' }, 404);
       const entry = Number(top.Last);

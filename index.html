@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ASX Swing Trader — Top 3 (AI + Tracking + Timeline)</title>
+  <title>ASX Swing Trader — Top 3 (AI + Tracking + Fees)</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
@@ -28,10 +28,26 @@
     const API = '/.netlify/functions/market';
     const AI = '/.netlify/functions/advice';
 
-    const MAX_INVEST = 1000;
-    const TP_PCT = 8;
-    const SL_PCT = 5;
-    const FEE_RT = 10; // approx round-trip
+    // ---- CommSec fees ----
+    function feeFor(capital){
+      const c = Number(capital||0);
+      if (c <= 1000) return 5.00;
+      if (c <= 3000) return 10.00;
+      if (c <= 10000) return 19.95;
+      if (c <= 25000) return 29.95;
+      // simple extrapolation: flat 29.95 beyond 25k (you can adjust later)
+      return 29.95;
+    }
+
+    function breakdown(capital, entry){
+      const buyFee = feeFor(capital);
+      const sellFee = feeFor(capital);
+      const qty = Math.max(0, Math.floor(Number(capital)/Number(entry)));
+      const invested = qty * Number(entry) + buyFee;
+      const totalFees = buyFee + sellFee;
+      const breakeven = qty>0 ? (Number(capital)+totalFees)/qty : null;
+      return { qty, buyFee, sellFee, totalFees, invested, breakeven };
+    }
 
     function useLocal(key, init){
       const [v,setV] = React.useState(()=>{
@@ -41,16 +57,22 @@
       return [v,setV];
     }
 
-    function Header(){ return (
+    function Header({ capital, setCapital }){ 
+      return (
       <header className="p-6">
         <h1 className="text-2xl md:text-3xl font-semibold">ASX Swing Trader <span className="text-violet-400">· top 3 picks</span></h1>
-        <p className="text-slate-400 text-sm mt-1">A${MAX_INVEST} per trade · +{TP_PCT}% TP · −{SL_PCT}% SL · AI advice + tracking + timeline</p>
+        <div className="text-slate-300 text-sm mt-2 flex flex-wrap gap-3 items-center">
+          <label className="muted">Investment capital (AUD):</label>
+          <input type="number" min="50" step="1" className="glass px-3 py-2 rounded-md w-40 text-slate-100"
+                 value={capital} onChange={e=>setCapital(Math.max(0, Number(e.target.value||0)))} />
+          <span className="muted text-xs">Fees auto-applied per CommSec tier · both buy + sell</span>
+        </div>
       </header>
     );}
 
     function ErrorLine({msg}){ if(!msg) return null; return <p className="text-sm text-rose-400">⚠️ {msg}</p>; }
 
-    function DailyTop3({ onPurchase }){
+    function Top3({ onPurchase, capital }){
       const [picks,setPicks]=useState([]);
       const [err,setErr]=useState(null);
       const [loading,setLoading]=useState(false);
@@ -74,7 +96,7 @@
       async function askAI(){
         setAiErr(null); setAi(null); setAiLoading(true);
         try{
-          const r = await fetch(`${AI}?mode=pick`);
+          const r = await fetch(`${AI}?mode=pick&capital=${encodeURIComponent(capital)}`);
           const j = await r.json();
           if(j.error) throw new Error(j.error + (j.details?(' · '+j.details):''));
           setAi(j.advice);
@@ -94,21 +116,30 @@
           <ErrorLine msg={err}/>
           {picks.length===0 && !err && <p className="muted text-sm">Finding candidates…</p>}
           <div className="space-y-2">
-            {picks.map(p=>(
-              <div key={p.symbol} className="glass p-3 rounded-lg space-y-1">
-                <div className="flex justify-between items-center">
-                  <div><span className="font-semibold">#{p.rank} {p.symbol}</span> <span className="text-xs text-slate-400">{p.name||''}</span></div>
-                  <span className="pill bg-white/10">Score {p.score.toFixed(2)}</span>
+            {picks.map(p=>{
+              const bd = breakdown(capital, p.last);
+              return (
+                <div key={p.symbol} className="glass p-3 rounded-lg space-y-1">
+                  <div className="flex justify-between items-center">
+                    <div><span className="font-semibold">#{p.rank} {p.symbol}</span> <span className="text-xs text-slate-400">{p.name||''}</span></div>
+                    <span className="pill bg-white/10">Score {p.score.toFixed(2)}</span>
+                  </div>
+                  <div className="text-sm">Entry {p.last.toFixed(4)} · Target {p.target.toFixed(4)} · Stop {p.stop.toFixed(4)} · Qty @ A${capital}: {bd.qty}</div>
+                  <div className="text-xs text-slate-300">
+                    Capital A${capital} · Buy Fee A${bd.buyFee.toFixed(2)} · Sell Fee A${bd.sellFee.toFixed(2)} · Total Fees A${bd.totalFees.toFixed(2)} · Effective Invested A${bd.invested.toFixed(2)} · Break-even ${bd.breakeven?bd.breakeven.toFixed(4):'—'}
+                  </div>
+                  <button className="btn mt-1 px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600"
+                          onClick={()=>onPurchase({ ...p, capital, qty: bd.qty, buyFee: bd.buyFee, sellFee: bd.sellFee, breakeven: bd.breakeven })}>
+                    Mark as Purchased
+                  </button>
                 </div>
-                <div className="text-sm">Entry {p.last.toFixed(4)} · Target {p.target.toFixed(4)} · Stop {p.stop.toFixed(4)} · Qty @ A${MAX_INVEST}: {Math.floor(MAX_INVEST/p.last)}</div>
-                <button className="btn mt-1 px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600" onClick={()=>onPurchase({ ...p, qty: Math.floor(MAX_INVEST/p.last) })}>Mark as Purchased</button>
-              </div>
-            ))}
+              );
+            })}
           </div>
           <ErrorLine msg={aiErr}/>
           {ai && (
             <div className="glass p-3 rounded-lg">
-              <div className="text-sm">AI summary (best overall):</div>
+              <div className="text-sm">AI summary (with capital A${capital}):</div>
               <div className="text-sm">Timeline: <span className="font-semibold">{ai.timelineDays ?? '—'} days</span></div>
               <pre className="text-xs bg-black/30 p-3 rounded-lg overflow-auto mt-2">{JSON.stringify(ai, null, 2)}</pre>
             </div>
@@ -117,7 +148,7 @@
       );
     }
 
-    function ManualCheck(){
+    function ManualCheck({ capital }){
       const [symbol,setSymbol]=useState('PLS');
       const [entry,setEntry]=useState(2.31);
       const [date,setDate]=useState('');
@@ -128,7 +159,7 @@
       async function ask(){
         setErr(null); setAi(null); setLoading(true);
         try{
-          const qs = new URLSearchParams({ mode:'manual', symbol:symbol.toUpperCase(), entry, purchasedAt: date || new Date().toISOString() });
+          const qs = new URLSearchParams({ mode:'manual', symbol:symbol.toUpperCase(), entry, purchasedAt: date || new Date().toISOString(), capital });
           const r = await fetch(`/.netlify/functions/advice?`+qs.toString());
           const j = await r.json();
           if(j.error) throw new Error(j.error + (j.details?(' · '+j.details):''));
@@ -136,6 +167,8 @@
         }catch(e){ setErr(e.message); }
         finally{ setLoading(false); }
       }
+
+      const bd = breakdown(capital, entry);
 
       return (
         <div className="card p-5 md:p-6 space-y-3">
@@ -145,6 +178,9 @@
             <input type="number" step="0.0001" className="glass px-3 py-2" value={entry} onChange={e=>setEntry(Number(e.target.value))} placeholder="Entry price"/>
             <input type="datetime-local" className="glass px-3 py-2" value={date} onChange={e=>setDate(e.target.value)} placeholder="Purchase date (optional)"/>
             <button className="btn px-3 py-2 rounded-lg bg-sky-600 hover:bg-sky-700" onClick={ask} disabled={loading}>{loading?'Asking…':'Ask ChatGPT'}</button>
+          </div>
+          <div className="text-xs text-slate-300">
+            Capital A${capital} · Qty {bd.qty} · Buy Fee A${bd.buyFee.toFixed(2)} · Sell Fee A${bd.sellFee.toFixed(2)} · Total Fees A${bd.totalFees.toFixed(2)} · Break-even ${bd.breakeven?bd.breakeven.toFixed(4):'—'}
           </div>
           <ErrorLine msg={err}/>
           {ai && (
@@ -167,7 +203,7 @@
       const [aiLoading,setAiLoading]=useState(false);
 
       async function refresh(){
-        setErr(null); setLoading(true);
+        setErr(null); setLoading=true;
         try{
           const qs = new URLSearchParams({ fn:'since', symbol: holding.symbol, from: holding.purchasedAt });
           const r = await fetch(`${API}?`+qs.toString());
@@ -181,16 +217,20 @@
 
       const entry = Number(holding.entry);
       const qty = Number(holding.qty);
-      const baseTP = entry * (1 + TP_PCT/100);
+      const capital = Number(holding.capital);
+      const buyFee = Number(holding.buyFee||feeFor(capital));
+      const sellFee = Number(holding.sellFee||feeFor(capital));
+      const baseTP = entry * 1 + (0.08*entry); // +8%
       const trail = (hi!=null) ? hi * 0.985 : null;
       const suggested = trail!=null ? Math.max(baseTP, trail) : baseTP;
       const pnlGross = (last!=null) ? (last - entry) * qty : null;
-      const pnlNet = (pnlGross!=null) ? pnlGross - FEE_RT : null;
+      const pnlNet = (pnlGross!=null) ? pnlGross - (buyFee + sellFee) : null;
+      const breakeven = holding.breakeven ?? ((capital + buyFee + sellFee) / qty);
 
       async function askAI(){
         setAiErr(null); setAi(null); setAiLoading(true);
         try{
-          const qs = new URLSearchParams({ mode:'holding', symbol:holding.symbol, entry:holding.entry, purchasedAt:holding.purchasedAt });
+          const qs = new URLSearchParams({ mode:'holding', symbol:holding.symbol, entry:holding.entry, purchasedAt:holding.purchasedAt, capital, fees:(buyFee+sellFee).toFixed(2) });
           const r = await fetch(`${AI}?`+qs.toString());
           const j = await r.json();
           if(j.error) throw new Error(j.error + (j.details?(' · '+j.details):''));
@@ -215,8 +255,11 @@
             <div className="glass px-3 py-2"><div className="muted text-sm">Entry</div><div className="text-xl font-semibold">{entry.toFixed(4)}</div></div>
             <div className="glass px-3 py-2"><div className="muted text-sm">Last</div><div className="text-xl font-semibold">{(last!=null)?Number(last).toFixed(4):'—'}</div></div>
             <div className="glass px-3 py-2"><div className="muted text-sm">High since buy</div><div className="text-xl font-semibold">{(hi!=null)?Number(hi).toFixed(4):'—'}</div></div>
-            <div className="glass px-3 py-2"><div className="muted text-sm">Suggested Sell</div><div className="text-xl font-semibold">{Number(suggested).toFixed(4)}</div><div className="muted text-xs">max(+{TP_PCT}%, trail 1.5%)</div></div>
+            <div className="glass px-3 py-2"><div className="muted text-sm">Suggested Sell</div><div className="text-xl font-semibold">{Number(suggested).toFixed(4)}</div><div className="muted text-xs">max(+8%, trail 1.5%)</div></div>
             <div className="glass px-3 py-2"><div className="muted text-sm">P/L (net est.)</div><div className={"text-xl font-semibold " + ((pnlNet||0)>=0?'text-emerald-400':'text-rose-400')}>{(pnlNet!=null)?('A$'+pnlNet.toFixed(2)):'—'}</div></div>
+          </div>
+          <div className="text-xs text-slate-300">
+            Capital A${capital} · Buy Fee A${buyFee.toFixed(2)} · Sell Fee A${sellFee.toFixed(2)} · Total Fees A${(buyFee+sellFee).toFixed(2)} · Break-even ${breakeven?breakeven.toFixed(4):'—'}
           </div>
           {ai && (
             <div className="glass p-3 rounded-lg">
@@ -231,15 +274,25 @@
     }
 
     function App(){
+      const [capital, setCapital] = useLocal('capital', 1000);
       const [holding, setHolding] = useLocal('holding', null);
 
       function handlePurchase(p){
-        const entry = Number(p.last);
-        const qty = Math.floor(MAX_INVEST / entry);
+        // Ask the amount invested using current capital default
+        let amt = prompt('Enter amount to invest (AUD):', String(capital));
+        if (amt === null) return;
+        amt = Number(amt);
+        if (!isFinite(amt) || amt <= 0) { alert('Invalid amount'); return; }
+
+        const bd = breakdown(amt, p.last);
         const newHold = {
           symbol: p.symbol,
-          entry,
-          qty,
+          entry: Number(p.last),
+          qty: bd.qty,
+          capital: amt,
+          buyFee: bd.buyFee,
+          sellFee: bd.sellFee,
+          breakeven: bd.breakeven,
           purchasedAt: new Date().toISOString()
         };
         setHolding(newHold);
@@ -248,9 +301,9 @@
 
       return (
         <div className="max-w-6xl mx-auto p-4 md:p-8 space-y-6">
-          <Header/>
-          <DailyTop3 onPurchase={handlePurchase} />
-          <ManualCheck/>
+          <Header capital={capital} setCapital={setCapital} />
+          <Top3 onPurchase={handlePurchase} capital={capital} />
+          <ManualCheck capital={capital} />
           {holding ? <Holding holding={holding} onClear={()=>setHolding(null)} /> : <p className="muted text-sm">No active holding. Pick one above and “Mark as Purchased”.</p>}
           <footer className="py-8 text-center text-slate-500 text-xs">Built for educational purposes. Not financial advice.</footer>
         </div>
