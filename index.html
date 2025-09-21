@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ASX Swing Trader</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root { --bg: #0b1020; --card: #121935; --muted: #94a3b8; --accent: #8b5cf6; }
+    body { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; background: var(--bg); color: #e2e8f0; }
+    .card { background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.01)); border: 1px solid rgba(148,163,184,0.15); border-radius: 1rem; backdrop-filter: blur(6px); }
+    .glass { background: rgba(255,255,255,0.04); border: 1px solid rgba(148,163,184,0.15); }
+    .btn { transition: transform .06s ease; }
+    .btn:active { transform: translateY(1px); }
+  </style>
+</head>
+<body class="min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useMemo } = React;
+    const API_BASE = '/.netlify/functions/te';
+    const fmt = new Intl.NumberFormat('en-AU', { style: 'currency', currency: 'AUD' });
+    const pct = (n) => (n == null || isNaN(n) ? '—' : `${n.toFixed(2)}%`);
+
+    function toNumber(x) {
+      if (x == null) return null;
+      const n = typeof x === 'number' ? x : parseFloat(String(x).replace(/,/g,''));
+      return isNaN(n) ? null : n;
+    }
+
+    function computeBands(entry, tpPct=8, slPct=5) {
+      const e = toNumber(entry)||0; return {
+        target: e * (1 + tpPct/100),
+        stop:   e * (1 - slPct/100)
+      };
+    }
+
+    function decisionForPosition({ last, entry, tpPct, slPct }) {
+      const { target, stop } = computeBands(entry, tpPct, slPct);
+      if (last <= stop) return { action: 'SELL', reason: `Price hit/under stop (${last.toFixed(4)} ≤ ${stop.toFixed(4)})` };
+      if (last >= target) return { action: 'TAKE PROFIT', reason: `Price hit/over target (${last.toFixed(4)} ≥ ${target.toFixed(4)})` };
+      return { action: 'HOLD', reason: `Between stop ${stop.toFixed(4)} and target ${target.toFixed(4)}` };
+    }
+
+    function scoreCandidate(row) {
+      const d = toNumber(row.DailyPercentualChange) || 0;
+      const w = toNumber(row.WeeklyPercentualChange) || 0;
+      const m = toNumber(row.MonthlyPercentualChange) || 0;
+      const cap = toNumber(row.MarketCap) || 0;
+      const capPenalty = cap > 5e9 ? 1.25 : cap > 1e9 ? 0.5 : 0;
+      return d + 0.5*w + 0.25*m - capPenalty;
+    }
+
+    async function fetchCountry(country = 'australia') {
+      const res = await fetch(`${API_BASE}?fn=country&country=${encodeURIComponent(country)}`);
+      return res.json();
+    }
+
+    async function fetchSymbol(symbol) {
+      const res = await fetch(`${API_BASE}?fn=symbol&symbol=${encodeURIComponent(symbol)}`);
+      return res.json();
+    }
+
+    function Header() {
+      return (
+        <header className="p-6">
+          <h1 className="text-2xl font-semibold">ASX Swing Trader</h1>
+          <p className="text-slate-400 text-sm">Rules: target +8% · stop −5% · fee ≈1%</p>
+        </header>
+      );
+    }
+
+    function PositionCard({ pos, settings, onUpdate }) {
+      const [symbolData, setSymbolData] = useState(null);
+      const last = toNumber(symbolData?.[0]?.Last);
+      const dec = last ? decisionForPosition({ last, entry: pos.entryPrice, tpPct: settings.tpPct, slPct: settings.slPct }) : null;
+
+      useEffect(()=>{ if (pos.ticker) fetchSymbol(pos.ticker).then(setSymbolData); }, [pos.ticker]);
+
+      return (
+        <div className="card p-5">
+          <h2 className="text-lg font-semibold">Current Position</h2>
+          <input value={pos.ticker} onChange={e=>onUpdate({...pos, ticker: e.target.value})} className="glass rounded-xl px-3 py-2 my-2" placeholder="Ticker (e.g. ZIP:AU)" />
+          <input type="number" value={pos.entryPrice} onChange={e=>onUpdate({...pos, entryPrice: Number(e.target.value)})} className="glass rounded-xl px-3 py-2 my-2" placeholder="Entry Price" />
+          <div className="mt-4">Last: {last?.toFixed(4) || '—'} | Decision: {dec?.action || '—'} | Reason: {dec?.reason || '—'}</div>
+        </div>
+      );
+    }
+
+    function Candidates({ settings, onPick }) {
+      const [rows, setRows] = useState([]);
+      useEffect(()=>{ fetchCountry(settings.country).then(data=>{
+        const mapped = data.map(x => ({
+          Symbol: x.Symbol || x.symbol,
+          Name: x.Name || x.name,
+          Last: toNumber(x.Last ?? x.last),
+          DailyPercentualChange: toNumber(x.DailyPercentualChange ?? x.daily_percentual_change),
+          WeeklyPercentualChange: toNumber(x.WeeklyPercentualChange ?? x.weekly_percentual_change),
+          MonthlyPercentualChange: toNumber(x.MonthlyPercentualChange ?? x.monthly_percentual_change),
+          MarketCap: toNumber(x.MarketCap ?? x.market_cap),
+        }));
+        const ranked = mapped.map(r => ({...r, _score: scoreCandidate(r)})).sort((a,b)=>b._score - a._score).slice(0,20);
+        setRows(ranked);
+      }); }, [settings.country]);
+
+      return (
+        <div className="card p-5 mt-6">
+          <h2 className="text-lg font-semibold mb-2">Top Candidates</h2>
+          <table className="w-full text-sm">
+            <thead><tr><th>Symbol</th><th>Name</th><th>Last</th><th>Daily%</th><th>Weekly%</th><th>Monthly%</th><th>Pick</th></tr></thead>
+            <tbody>
+              {rows.map(r=>(
+                <tr key={r.Symbol} className="border-t border-slate-700/40">
+                  <td>{r.Symbol}</td><td>{r.Name}</td><td>{r.Last}</td>
+                  <td>{pct(r.DailyPercentualChange)}</td><td>{pct(r.WeeklyPercentualChange)}</td><td>{pct(r.MonthlyPercentualChange)}</td>
+                  <td><button className="btn bg-violet-500 rounded px-2 py-1" onClick={()=>onPick(r)}>Select</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+    }
+
+    function App() {
+      const [settings] = useState({ country: 'australia', tpPct: 8, slPct: 5 });
+      const [position, setPosition] = useState({ ticker: '', entryPrice: 0 });
+      const [pick, setPick] = useState(null);
+      return (
+        <div className="max-w-4xl mx-auto p-4 space-y-6">
+          <Header />
+          <PositionCard pos={position} settings={settings} onUpdate={setPosition} />
+          <Candidates settings={settings} onPick={setPick} />
+          {pick && <div className="card p-5 mt-6"><h2>Suggested Trade: {pick.Symbol} @ {pick.Last}</h2></div>}
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
