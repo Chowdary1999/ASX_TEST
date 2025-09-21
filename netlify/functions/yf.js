@@ -1,39 +1,50 @@
-// netlify/functions/yf.js
-// Yahoo Finance proxy (no API key).
-// Endpoints:
-//  - /.netlify/functions/yf?fn=quote&symbols=PLS.AX,CSL.AX
-//  - /.netlify/functions/yf?fn=spark&symbols=PLS.AX,CSL.AX&range=1mo&interval=1d
-export async function handler(event, context) {
-  const { fn, symbols = "", range = "1mo", interval = "1d" } = event.queryStringParameters || {};
+// netlify/functions/yf.js (CommonJS)
+const https = require('https');
+
+async function fetchJSON(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)); }
+        catch (e) { reject(e); }
+      });
+    }).on('error', reject);
+  });
+}
+
+module.exports.handler = async (event, context) => {
+  const params = event.queryStringParameters || {};
+  const fn = params.fn;
+  const symbols = params.symbols || '';
+  const range = params.range || '1mo';
+  const interval = params.interval || '1d';
+
   try {
     let url;
-    if (fn === "quote") {
-      url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbols}`;
-    } else if (fn === "spark") {
-      url = `https://query1.finance.yahoo.com/v7/finance/spark?symbols=${symbols}&range=${range}&interval=${interval}`;
+    if (fn === 'quote') {
+      url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbols)}`;
+    } else if (fn === 'spark') {
+      url = `https://query1.finance.yahoo.com/v7/finance/spark?symbols=${encodeURIComponent(symbols)}&range=${encodeURIComponent(range)}&interval=${encodeURIComponent(interval)}`;
     } else {
-      return json({ error: "Unsupported fn. Use fn=quote|spark" }, 400);
+      return json({ error: 'Unsupported fn. Use fn=quote|spark' }, 400);
     }
-    const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
-    if (!res.ok) {
-      const text = await res.text();
-      return json({ error: `Upstream error ${res.status}`, body: text }, res.status);
-    }
-    const data = await res.json();
+    const data = await fetchJSON(url);
     return json(data, 200, {
-      "Cache-Control": "no-store",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, OPTIONS",
+      'Cache-Control': 'no-store',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, OPTIONS',
     });
   } catch (e) {
     return json({ error: e.message }, 500);
   }
-}
+};
 
 function json(body, status = 200, headers = {}) {
   return {
     statusCode: status,
-    headers: { "Content-Type": "application/json", ...headers },
+    headers: { 'Content-Type': 'application/json', ...headers },
     body: JSON.stringify(body),
   };
 }
