@@ -1,7 +1,6 @@
 // netlify/functions/market.js
-// All-in-one backend: /quote, /since, /candidates, /pick
+// Endpoints: quote, since, chart, candidates, pick, pick3
 const https = require('https');
-
 function fetchJSON(url) {
   return new Promise((resolve, reject) => {
     https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }, (res) => {
@@ -19,10 +18,14 @@ function json(body, status=200, headers={}){
 }
 function pct(n){ return (n==null||isNaN(n)) ? null : Number(n); }
 
-async function yahooLast(symbolAX){
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbolAX)}?interval=1d&range=1d`;
+async function yahooChart(symbolAX, range='6mo', interval='1d'){
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbolAX)}?interval=${interval}&range=${range}`;
   const y = await fetchJSON(url);
-  const close = y?.chart?.result?.[0]?.indicators?.quote?.[0]?.close || [];
+  return y?.chart?.result?.[0] || null;
+}
+async function yahooLast(symbolAX){
+  const r = await yahooChart(symbolAX, '1d', '1d');
+  const close = r?.indicators?.quote?.[0]?.close || [];
   const last = [...close].reverse().find(v=>v!=null);
   return last ?? null;
 }
@@ -36,20 +39,10 @@ exports.handler = async (event) => {
       const raw = (q.symbol||'').trim().toUpperCase();
       if (!raw) return json({ error: 'Missing symbol' }, 400);
       const ySym = raw.includes('.AX') ? raw : `${raw}.AX`;
-      const teSym = raw.includes(':AU') ? raw : `${raw}:AU`;
-
       try {
         const last = await yahooLast(ySym);
         if (last != null) return json({ source: 'yahoo', symbol: ySym, last });
       } catch {}
-
-      try {
-        const teurl = `https://api.tradingeconomics.com/markets/symbol/${encodeURIComponent(teSym)}?c=guest:guest&f=json`;
-        const te = await fetchJSON(teurl);
-        const last = te?.[0]?.Last ?? te?.[0]?.last;
-        if (last != null) return json({ source: 'te', symbol: teSym, last });
-      } catch {}
-
       return json({ error: 'No data for symbol' }, 404);
     }
 
@@ -59,11 +52,9 @@ exports.handler = async (event) => {
       if (!raw) return json({ error: 'Missing symbol' }, 400);
       const ySym = raw.includes('.AX') ? raw : `${raw}.AX`;
 
-      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ySym)}?interval=1d&range=3mo`;
-      const y = await fetchJSON(url);
-      const result = y?.chart?.result?.[0];
-      const closes = result?.indicators?.quote?.[0]?.close || [];
-      const ts = result?.timestamp || [];
+      const r = await yahooChart(ySym, '3mo', '1d');
+      const closes = r?.indicators?.quote?.[0]?.close || [];
+      const ts = r?.timestamp || [];
       let high = null;
       for (let i=0;i<closes.length;i++){
         const c = closes[i];
@@ -78,7 +69,31 @@ exports.handler = async (event) => {
       return json({ last, highSince: high });
     }
 
-    if (fn === 'candidates' || fn === 'pick') {
+    if (fn === 'chart') {
+      const raw = (q.symbol||'').trim().toUpperCase();
+      const range = q.range || '1y';
+      const interval = q.interval || '1d';
+      if (!raw) return json({ error: 'Missing symbol' }, 400);
+      const ySym = raw.includes('.AX') ? raw : `${raw}.AX`;
+      const r = await yahooChart(ySym, range, interval);
+      if (!r) return json({ error: 'No chart data' }, 404);
+
+      const closes = r?.indicators?.quote?.[0]?.close || [];
+      const ts = r?.timestamp || [];
+      const valid = [];
+      for (let i=0;i<closes.length;i++){
+        if (closes[i]!=null && ts[i]!=null){
+          valid.push({ t: ts[i]*1000, c: closes[i] });
+        }
+      }
+      const last = valid.length ? valid[valid.length-1].c : null;
+      const hi = valid.reduce((m,p)=> m==null?p.c:Math.max(m,p.c), null);
+      const lo = valid.reduce((m,p)=> m==null?p.c:Math.min(m,p.c), null);
+
+      return json({ last, high: hi, low: lo, points: valid.slice(-250) });
+    }
+
+    if (fn === 'candidates' || fn === 'pick' || fn === 'pick3') {
       const url = `https://api.tradingeconomics.com/markets/stocks/country/australia?c=guest:guest&f=json`;
       const data = await fetchJSON(url);
       const rows = (data||[]).map(r => ({
@@ -91,8 +106,6 @@ exports.handler = async (event) => {
         MarketCap: r.MarketCap ?? r.market_cap ?? null,
       })).filter(r => r.Symbol && r.Last != null);
 
-      if (fn === 'candidates') return json({ rows });
-
       const ranked = rows
         .filter(r => r.Last > 0)
         .filter(r => (r.MarketCap==null) || (r.MarketCap >= 1e8))
@@ -103,19 +116,30 @@ exports.handler = async (event) => {
         })
         .sort((a,b)=> (b._score||-1e9)-(a._score||-1e9));
 
+      if (fn === 'candidates') return json({ rows: ranked });
+
+      if (fn === 'pick3') {
+        const top3 = ranked.slice(0,3).map((t,i)=>{
+          const entry = Number(t.Last);
+          const target = entry * 1.08;
+          const stop = entry * 0.95;
+          return { rank:i+1, symbol:t.Symbol, name:t.Name, last:entry, target, stop, score:t._score };
+        });
+        return json({ picks: top3 });
+      }
+
+      // fn === 'pick' (best single)
       const top = ranked[0];
       if (!top) return json({ error: 'No candidates found' }, 404);
-
       const entry = Number(top.Last);
       const target = entry * 1.08;
       const stop = entry * 0.95;
       const reason = `Strong momentum: daily ${top.Daily?.toFixed?.(2)}%, weekly ${top.Weekly?.toFixed?.(2)}%, monthly ${top.Monthly?.toFixed?.(2)}%` +
                      (top.MarketCap ? `; MCAP ~ ${Math.round(top.MarketCap/1e6)}M` : '');
-
       return json({ symbol: top.Symbol, name: top.Name, last: entry, target, stop, score: top._score, reason });
     }
 
-    return json({ error: 'Unsupported fn. Use fn=quote|since|candidates|pick' }, 400);
+    return json({ error: 'Unsupported fn. Use fn=quote|since|chart|candidates|pick|pick3' }, 400);
   } catch (e) {
     return json({ error: e.message }, 500);
   }
