@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ASX Swing Trader — Advisor + Tracking + AI</title>
+  <title>ASX Swing Trader — All‑in‑One (AI + Tracking)</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
@@ -16,6 +16,7 @@
     .glass { background: rgba(255,255,255,0.06); border: 1px solid rgba(148,163,184,0.18); border-radius: .75rem; }
     .btn { transition: transform .06s ease; } .btn:active{ transform: translateY(1px); }
     .muted{ color:#94a3b8; }
+    .pill { padding: .15rem .5rem; border-radius: .5rem; font-size: .75rem; }
   </style>
 </head>
 <body class="min-h-screen">
@@ -24,8 +25,12 @@
   <script type="text/babel">
     const { useState, useEffect } = React;
     const API = '/.netlify/functions/market';
+    const AI = '/.netlify/functions/advice';
 
     const MAX_INVEST = 1000;
+    const TP_PCT = 8;
+    const SL_PCT = 5;
+    const FEE_RT = 10; // approx round-trip
 
     function useLocal(key, init){
       const [v,setV] = React.useState(()=>{
@@ -37,15 +42,20 @@
 
     function Header(){ return (
       <header className="p-6">
-        <h1 className="text-2xl md:text-3xl font-semibold">ASX Swing Trader <span className="text-violet-400">· advisor + AI</span></h1>
-        <p className="text-slate-400 text-sm mt-1">Max invest A${MAX_INVEST} · AI advice via OpenAI API</p>
+        <h1 className="text-2xl md:text-3xl font-semibold">ASX Swing Trader <span className="text-violet-400">· all‑in‑one</span></h1>
+        <p className="text-slate-400 text-sm mt-1">A${MAX_INVEST} per trade · +{TP_PCT}% TP · −{SL_PCT}% SL · AI advice + tracking</p>
       </header>
     );}
+
+    function ErrorLine({msg}){ if(!msg) return null; return <p className="text-sm text-rose-400">⚠️ {msg}</p>; }
 
     function DailyPick({ onPurchase }){
       const [pick,setPick]=useState(null);
       const [err,setErr]=useState(null);
       const [loading,setLoading]=useState(false);
+      const [ai,setAi]=useState(null);
+      const [aiErr,setAiErr]=useState(null);
+      const [aiLoading,setAiLoading]=useState(false);
 
       async function refresh(){
         setErr(null); setLoading(true);
@@ -54,18 +64,23 @@
           const data = await res.json();
           if(data.error) throw new Error(data.error);
           setPick(data);
+          setAi(null); setAiErr(null);
         }catch(e){ setErr(e.message); setPick(null); }
         finally{ setLoading(false); }
       }
-
       useEffect(()=>{ refresh(); }, []);
 
       const qty = pick ? Math.floor(MAX_INVEST / Number(pick.last)) : 0;
 
       async function askAI(){
-        const r = await fetch('/.netlify/functions/advice?mode=pick');
-        const j = await r.json();
-        alert('AI pick advice:\\n' + JSON.stringify(j.advice, null, 2));
+        setAiErr(null); setAi(null); setAiLoading(true);
+        try{
+          const r = await fetch(`${AI}?mode=pick`);
+          const j = await r.json();
+          if(j.error) throw new Error(j.error + (j.details?(' · '+j.details):''));
+          setAi(j.advice);
+        }catch(e){ setAiErr(e.message); }
+        finally{ setAiLoading(false); }
       }
 
       return (
@@ -74,31 +89,93 @@
             <h2 className="text-lg font-semibold">Daily Pick (AI-ranked)</h2>
             <button className="btn px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600" onClick={refresh} disabled={loading}>{loading?'Loading…':'Refresh'}</button>
           </div>
-          {err && <p className="text-sm text-rose-400">⚠️ {err}</p>}
+          <ErrorLine msg={err}/>
+          {!pick && !err && <p className="muted text-sm">Finding a candidate…</p>}
           {pick && (
-            <div>
-              <p>{pick.symbol} @ {Number(pick.last).toFixed(4)} (qty {qty})</p>
-              <button className="btn px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-600 mt-2" onClick={()=>onPurchase({ ...pick, qty })}>Mark as Purchased</button>
-              <button className="btn px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-700 mt-2 ml-2" onClick={askAI}>Ask ChatGPT about this pick</button>
+            <div className="grid md:grid-cols-6 gap-3">
+              <div className="glass px-3 py-2"><div className="muted text-sm">Symbol</div><div className="text-xl font-semibold">{pick.symbol}</div><div className="muted text-xs">{pick.name||''}</div></div>
+              <div className="glass px-3 py-2"><div className="muted text-sm">Entry</div><div className="text-xl font-semibold">{Number(pick.last).toFixed(4)}</div></div>
+              <div className="glass px-3 py-2"><div className="muted text-sm">Target (+{TP_PCT}%)</div><div className="text-xl font-semibold">{Number(pick.target).toFixed(4)}</div></div>
+              <div className="glass px-3 py-2"><div className="muted text-sm">Stop (−{SL_PCT}%)</div><div className="text-xl font-semibold">{Number(pick.stop).toFixed(4)}</div></div>
+              <div className="glass px-3 py-2"><div className="muted text-sm">Qty @ A${MAX_INVEST}</div><div className="text-xl font-semibold">{qty}</div></div>
+              <div className="glass px-3 py-2"><div className="muted text-sm">Score</div><div className="text-xl font-semibold">{Number(pick.score).toFixed(2)}</div></div>
             </div>
           )}
+          <div className="flex gap-2">
+            {pick && <button className="btn px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-600" onClick={()=>onPurchase({ ...pick, qty })}>Mark as Purchased</button>}
+            {pick && <button className="btn px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-700" onClick={askAI} disabled={aiLoading}>{aiLoading?'Asking…':'Ask ChatGPT about this pick'}</button>}
+          </div>
+          <ErrorLine msg={aiErr}/>
+          {ai && <pre className="text-xs bg-black/30 p-3 rounded-lg overflow-auto">{JSON.stringify(ai, null, 2)}</pre>}
         </div>
       );
     }
 
     function Holding({ holding, onClear }){
-      async function askAI(){
-        const qs = new URLSearchParams({ mode:'holding', symbol:holding.symbol, entry:holding.entry, purchasedAt:holding.purchasedAt });
-        const r = await fetch('/.netlify/functions/advice?' + qs.toString());
-        const j = await r.json();
-        alert('AI holding advice:\\n' + JSON.stringify(j.advice, null, 2));
+      const [last,setLast]=useState(null);
+      const [hi,setHi]=useState(null);
+      const [err,setErr]=useState(null);
+      const [ai,setAi]=useState(null);
+      const [aiErr,setAiErr]=useState(null);
+      const [loading,setLoading]=useState(false);
+      const [aiLoading,setAiLoading]=useState(false);
+
+      async function refresh(){
+        setErr(null); setLoading(true);
+        try{
+          const qs = new URLSearchParams({ fn:'since', symbol: holding.symbol, from: holding.purchasedAt });
+          const r = await fetch(`${API}?`+qs.toString());
+          const j = await r.json();
+          if(j.error) throw new Error(j.error);
+          setLast(j.last); setHi(j.highSince);
+        }catch(e){ setErr(e.message); setLast(null); setHi(null); }
+        finally{ setLoading(false); }
       }
+      useEffect(()=>{ refresh(); }, [holding.symbol, holding.purchasedAt]);
+
+      const entry = Number(holding.entry);
+      const qty = Number(holding.qty);
+      const invested = qty * entry;
+      const baseTP = entry * (1 + TP_PCT/100);
+      const trail = (hi!=null) ? hi * 0.985 : null;
+      const suggested = trail!=null ? Math.max(baseTP, trail) : baseTP;
+      const pnlGross = (last!=null) ? (last - entry) * qty : null;
+      const pnlNet = (pnlGross!=null) ? pnlGross - FEE_RT : null;
+
+      async function askAI(){
+        setAiErr(null); setAi(null); setAiLoading(true);
+        try{
+          const qs = new URLSearchParams({ mode:'holding', symbol:holding.symbol, entry:holding.entry, purchasedAt:holding.purchasedAt });
+          const r = await fetch(`${AI}?`+qs.toString());
+          const j = await r.json();
+          if(j.error) throw new Error(j.error + (j.details?(' · '+j.details):''));
+          setAi(j.advice);
+        }catch(e){ setAiErr(e.message); }
+        finally{ setAiLoading(false); }
+      }
+
       return (
         <div className="card p-5 md:p-6 space-y-3">
-          <h2 className="text-lg font-semibold">Holding</h2>
-          <p>{holding.symbol} @ {holding.entry} (qty {holding.qty})</p>
-          <button className="btn px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600" onClick={askAI}>Ask ChatGPT (Hold/Sell?)</button>
-          <button className="btn px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 ml-2" onClick={onClear}>Clear</button>
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-semibold">Holding</h2>
+            <div className="flex gap-2">
+              <span className="pill bg-white/10">Qty {qty}</span>
+              <button className="btn px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600" onClick={refresh} disabled={loading}>{loading?'Loading…':'Refresh'}</button>
+              <button className="btn px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-700" onClick={askAI} disabled={aiLoading}>{aiLoading?'Asking…':'Ask ChatGPT (Hold/Sell?)'}</button>
+              <button className="btn px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700" onClick={onClear}>Clear</button>
+            </div>
+          </div>
+          <div className="grid md:grid-cols-6 gap-3">
+            <div className="glass px-3 py-2"><div className="muted text-sm">Symbol</div><div className="text-xl font-semibold">{holding.symbol}</div></div>
+            <div className="glass px-3 py-2"><div className="muted text-sm">Entry</div><div className="text-xl font-semibold">{entry.toFixed(4)}</div></div>
+            <div className="glass px-3 py-2"><div className="muted text-sm">Last</div><div className="text-xl font-semibold">{(last!=null)?Number(last).toFixed(4):'—'}</div></div>
+            <div className="glass px-3 py-2"><div className="muted text-sm">High since buy</div><div className="text-xl font-semibold">{(hi!=null)?Number(hi).toFixed(4):'—'}</div></div>
+            <div className="glass px-3 py-2"><div className="muted text-sm">Suggested Sell</div><div className="text-xl font-semibold">{Number(suggested).toFixed(4)}</div><div className="muted text-xs">max(+{TP_PCT}%, trail 1.5%)</div></div>
+            <div className="glass px-3 py-2"><div className="muted text-sm">P/L (net est.)</div><div className={"text-xl font-semibold " + ((pnlNet||0)>=0?'text-emerald-400':'text-rose-400')}>{(pnlNet!=null)?('A$'+pnlNet.toFixed(2)):'—'}</div></div>
+          </div>
+          <ErrorLine msg={err}/>
+          {ai && <pre className="text-xs bg-black/30 p-3 rounded-lg overflow-auto">{JSON.stringify(ai, null, 2)}</pre>}
+          <ErrorLine msg={aiErr}/>
         </div>
       );
     }
@@ -107,20 +184,24 @@
       const [holding, setHolding] = useLocal('holding', null);
 
       function handlePurchase(p){
+        const entry = Number(p.last);
+        const qty = Math.floor(MAX_INVEST / entry);
         const newHold = {
           symbol: p.symbol,
-          entry: Number(p.last),
-          qty: p.qty,
+          entry,
+          qty,
           purchasedAt: new Date().toISOString()
         };
         setHolding(newHold);
+        window.scrollTo({ top: 0, behavior: 'smooth' });
       }
 
       return (
-        <div className="max-w-4xl mx-auto p-4 md:p-8 space-y-6">
+        <div className="max-w-6xl mx-auto p-4 md:p-8 space-y-6">
           <Header/>
           <DailyPick onPurchase={handlePurchase} />
-          {holding && <Holding holding={holding} onClear={()=>setHolding(null)} />}
+          {holding ? <Holding holding={holding} onClear={()=>setHolding(null)} /> : <p className="muted text-sm">No active holding. Use “Mark as Purchased”.</p>}
+          <footer className="py-8 text-center text-slate-500 text-xs">Built for educational purposes. Not financial advice.</footer>
         </div>
       );
     }
