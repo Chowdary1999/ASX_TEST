@@ -1,14 +1,108 @@
 // netlify/functions/market.js
-const https=require('https');
-function fetchJSON(url){return new Promise((resolve,reject)=>{https.get(url,{headers:{'User-Agent':'Mozilla/5.0'}},res=>{let d='';res.on('data',c=>d+=c);res.on('end',()=>{try{resolve(JSON.parse(d))}catch(e){reject(new Error('Bad JSON from '+url+': '+e.message))}})}).on('error',reject)})}
-function json(body,status=200,headers={}){return{statusCode:status,headers:{'Content-Type':'application/json',...headers},body:JSON.stringify(body)}}
-function pct(n){return(n==null||isNaN(n))?null:Number(n)}
-async function yahooChart(sym,range='6mo',interval='1d'){const url=`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?interval=${interval}&range=${range}`;const y=await fetchJSON(url);return y?.chart?.result?.[0]||null}
-async function yahooLast(sym){const r=await yahooChart(sym,'1d','1d');const close=r?.indicators?.quote?.[0]?.close||[];const last=[...close].reverse().find(v=>v!=null);return last??null}
-exports.handler=async(event)=>{const q=event.queryStringParameters||{};const fn=q.fn;try{
-if(fn==='quote'){const raw=(q.symbol||'').trim().toUpperCase();if(!raw)return json({error:'Missing symbol'},400);const ySym=raw.includes('.AX')?raw:`${raw}.AX`;try{const last=await yahooLast(ySym);if(last!=null)return json({source:'yahoo',symbol:ySym,last})}catch{}return json({error:'No data for symbol'},404)}
-if(fn==='since'){const raw=(q.symbol||'').trim().toUpperCase();const from=q.from?new Date(q.from):null;if(!raw)return json({error:'Missing symbol'},400);const ySym=raw.includes('.AX')?raw:`${raw}.AX`;const r=await yahooChart(ySym,'3mo','1d');const closes=r?.indicators?.quote?.[0]?.close||[];const ts=r?.timestamp||[];let high=null;for(let i=0;i<closes.length;i++){const c=closes[i];if(c==null)continue;if(from){const t=ts[i]?new Date(ts[i]*1000):null;if(t&&t<from)continue}if(high==null||c>high)high=c}const last=[...closes].reverse().find(v=>v!=null)??null;return json({last,highSince:high})}
-if(fn==='chart'){const raw=(q.symbol||'').trim().toUpperCase();const range=q.range||'1y';const interval=q.interval||'1d';if(!raw)return json({error:'Missing symbol'},400);const ySym=raw.includes('.AX')?raw:`${raw}.AX`;const r=await yahooChart(ySym,range,interval);if(!r)return json({error:'No chart data'},404);const closes=r?.indicators?.quote?.[0]?.close||[];const ts=r?.timestamp||[];const valid=[];for(let i=0;i<closes.length;i++){if(closes[i]!=null&&ts[i]!=null){valid.push({t:ts[i]*1000,c:closes[i]})}}const last=valid.length?valid[valid.length-1].c:null;const hi=valid.reduce((m,p)=>m==null?p.c:Math.max(m,p.c),null);const lo=valid.reduce((m,p)=>m==null?p.c:Math.min(m,p.c),null);return json({last,high:hi,low:lo,points:valid.slice(-250)})}
-if(fn==='candidates'||fn==='pick'||fn==='pick3'){const url=`https://api.tradingeconomics.com/markets/stocks/country/australia?c=guest:guest&f=json`;const data=await fetchJSON(url);const rows=(data||[]).map(r=>({Symbol:r.Symbol||r.symbol,Name:r.Name||r.name,Last:r.Last??r.last??null,Daily:pct(r.DailyPercentualChange??r.daily_percentual_change),Weekly:pct(r.WeeklyPercentualChange??r.weekly_percentual_change),Monthly:pct(r.MonthlyPercentualChange??r.monthly_percentual_change),MarketCap:r.MarketCap??r.market_cap??null})).filter(r=>r.Symbol&&r.Last!=null);const ranked=rows.filter(r=>r.Last>0).filter(r=>(r.MarketCap==null)||(r.MarketCap>=1e8)).map(r=>{const capPenalty=r.MarketCap>5e9?1.25:(r.MarketCap>1e9?0.5:0);const score=(r.Daily||0)+0.5*(r.Weekly||0)+0.25*(r.Monthly||0)-capPenalty;return {...r,_score:score}}).sort((a,b)=>(b._score||-1e9)-(a._score||-1e9));if(fn==='candidates')return json({rows:ranked});if(fn==='pick3'){const top3=ranked.slice(0,3).map((t,i)=>{const entry=Number(t.Last);const target=entry*1.08;const stop=entry*0.95;return{rank:i+1,symbol:t.Symbol,name:t.Name,last:entry,target,stop,score:t._score}});return json({picks:top3})}const top=ranked[0];if(!top)return json({error:'No candidates found'},404);const entry=Number(top.Last);const target=entry*1.08;const stop=entry*0.95;return json({symbol:top.Symbol,name:top.Name,last:entry,target,stop,score:top._score})}
-return json({error:'Unsupported fn. Use fn=quote|since|chart|candidates|pick|pick3'},400)
-}catch(e){return json({error:e.message},500)}}
+// Pick3 with timestamp and no-cache headers. It returns entry price (close) only.
+// The client computes dynamic targets from capital & profit %.
+const https = require('https');
+
+function fetchJSON(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }, (res) => {
+      let data=''; res.on('data', c => data += c);
+      res.on('end', () => { try { resolve(JSON.parse(data)); } catch (e) { reject(new Error(`Bad JSON from ${url}: ${e.message}`)); } });
+    }).on('error', reject);
+  });
+}
+function json(body, status=200){
+  return {
+    statusCode: status,
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+      'Pragma': 'no-cache',
+      'Expires': '0',
+      'Access-Control-Allow-Origin': '*'
+    },
+    body: JSON.stringify(body)
+  };
+}
+
+async function yahooChart(symbolAX, range='6mo', interval='1d'){
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbolAX)}?interval=${interval}&range=${range}`;
+  const y = await fetchJSON(url);
+  return y?.chart?.result?.[0] || null;
+}
+async function getCloses(symbolAX){
+  const r = await yahooChart(symbolAX, '6mo', '1d');
+  const closes = r?.indicators?.quote?.[0]?.close || [];
+  return closes.filter(v => v != null);
+}
+function changePct(arr, nBack){
+  if (!arr || arr.length <= nBack) return null;
+  const a = arr[arr.length-1];
+  const b = arr[arr.length-1-nBack];
+  if (!isFinite(a) || !isFinite(b) || b === 0) return null;
+  return (a - b) / b * 100.0;
+}
+
+exports.handler = async (event) => {
+  const q = event.queryStringParameters || {};
+  const fn = q.fn;
+
+  try {
+    if (fn === 'pick3') {
+      // seed list from TradingEconomics, then rank from Yahoo momentum
+      const te = await fetchJSON(`https://api.tradingeconomics.com/markets/stocks/country/australia?c=guest:guest&f=json`);
+      const rows = (te||[]).map(r => ({
+        symbol: (r.Symbol || r.symbol || '').toUpperCase(),
+        name: r.Name || r.name || '',
+        mcap: r.MarketCap ?? r.market_cap ?? null,
+      })).filter(r => r.symbol && r.symbol.endsWith('.AX'));
+      const pool = rows.sort((a,b)=> (b.mcap||0)-(a.mcap||0)).slice(0, 60);
+
+      const scored = [];
+      for (const row of pool){
+        try{
+          const closes = await getCloses(row.symbol);
+          if (!closes || closes.length < 40) continue;
+          const last = closes[closes.length-1];
+          if (!isFinite(last) || last <= 0.05) continue;
+          const d1 = changePct(closes, 1)  ?? 0;
+          const d5 = changePct(closes, 5)  ?? 0;
+          const d20= changePct(closes, 20) ?? 0;
+          const score = 0.6*d1 + 0.3*d5 + 0.1*d20 - (row.mcap>5e9?1.25:(row.mcap>1e9?0.5:0));
+          scored.push({ rank:null, symbol:row.symbol, name:row.name, entry:last, score });
+        }catch{}
+      }
+      scored.sort((a,b)=> (b.score||-1e9)-(a.score||-1e9));
+      const top3 = scored.slice(0,3).map((t,i)=>({ ...t, rank:i+1 }));
+      const asOf = new Date().toISOString();
+      return json({ picks: top3, asOf });
+    }
+
+    if (fn === 'since') {
+      const raw = (q.symbol||'').trim().toUpperCase();
+      const from = q.from ? new Date(q.from) : null;
+      if (!raw) return json({ error: 'Missing symbol' }, 400);
+      const ySym = raw.includes('.AX') ? raw : `${raw}.AX`;
+
+      const r = await yahooChart(ySym, '3mo', '1d');
+      const closes = r?.indicators?.quote?.[0]?.close || [];
+      const ts = r?.timestamp || [];
+      let high = null;
+      for (let i=0;i<closes.length;i++){
+        const c = closes[i];
+        if (c==null) continue;
+        if (from){
+          const t = ts[i] ? new Date(ts[i]*1000) : null;
+          if (t && t < from) continue;
+        }
+        if (high==null || c>high) high=c;
+      }
+      const last = [...closes].reverse().find(v=>v!=null) ?? null;
+      return json({ last, highSince: high });
+    }
+
+    return json({ error: 'Unsupported fn. Use fn=pick3|since' }, 400);
+  } catch (e) {
+    return json({ error: e.message }, 500);
+  }
+};
