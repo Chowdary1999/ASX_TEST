@@ -1,9 +1,8 @@
 // netlify/functions/market.js
-// Yahoo-only data source: 90-day history & live quotes across an ASX universe.
-// Also computes features for AI to consume. No TE dependency.
+// Yahoo-only 90-day history, plus simple live quote endpoint.
 const https = require('https');
 
-const UNIVERSE = ["BHP.AX", "CBA.AX", "CSL.AX", "NAB.AX", "WBC.AX", "ANZ.AX", "WES.AX", "WDS.AX", "FMG.AX", "MQG.AX", "TLS.AX", "WOW.AX", "TCL.AX", "QBE.AX", "RIO.AX", "BXB.AX", "GMG.AX", "ORG.AX", "ALL.AX", "WOR.AX", "SUN.AX", "COH.AX", "COL.AX", "APA.AX", "AMP.AX", "ARB.AX", "CWN.AX", "CWY.AX", "DMP.AX", "FLT.AX", "GPT.AX", "IAG.AX", "JHX.AX", "LLC.AX", "MPL.AX", "NHF.AX", "NXT.AX", "ORI.AX", "OSH.AX", "PME.AX", "QAN.AX", "REA.AX", "RHC.AX", "S32.AX", "SDF.AX", "SEK.AX", "SHL.AX", "SXY.AX", "TWE.AX", "VCX.AX", "WTC.AX", "WHC.AX", "MIN.AX", "PLS.AX", "LTR.AX", "LYC.AX", "IGO.AX", "CXO.AX", "RMD.AX", "PMV.AX", "CAR.AX", "CPU.AX", "BRG.AX", "SUL.AX", "SGP.AX", "SCG.AX", "EDV.AX", "EVN.AX", "NST.AX", "NCM.AX", "CHN.AX", "NIC.AX", "MP1.AX", "WEB.AX", "KGN.AX", "APX.AX", "XRO.AX", "ALU.AX", "DHG.AX", "A2M.AX"];
+const UNIVERSE = ["BHP.AX","CBA.AX","CSL.AX","NAB.AX","WBC.AX","ANZ.AX","WES.AX","WDS.AX","FMG.AX","MQG.AX","TLS.AX","WOW.AX","TCL.AX","QBE.AX","RIO.AX","BXB.AX","GMG.AX","ORG.AX","ALL.AX","WOR.AX","SUN.AX","COH.AX","COL.AX","APA.AX","ARB.AX","CWY.AX","DMP.AX","FLT.AX","GPT.AX","IAG.AX","JHX.AX","LLC.AX","MPL.AX","NXT.AX","ORI.AX","PME.AX","QAN.AX","REA.AX","RHC.AX","S32.AX","SEK.AX","SHL.AX","SXY.AX","TWE.AX","VCX.AX","WTC.AX","WHC.AX","MIN.AX","PLS.AX","LTR.AX","LYC.AX","IGO.AX","CXO.AX","RMD.AX","PMV.AX","CAR.AX","CPU.AX","BRG.AX","SUL.AX","SGP.AX","SCG.AX","EVN.AX","NST.AX","NIC.AX","MP1.AX","WEB.AX","XRO.AX","ALU.AX","A2M.AX"];
 
 function fetchJSON(url, timeoutMs=8000) {
   return new Promise((resolve, reject) => {
@@ -16,11 +15,7 @@ function fetchJSON(url, timeoutMs=8000) {
   });
 }
 function json(body, status=200){
-  return {
-    statusCode: status,
-    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' },
-    body: JSON.stringify(body)
-  };
+  return { statusCode: status, headers: { 'Content-Type':'application/json','Cache-Control':'no-store','Access-Control-Allow-Origin':'*' }, body: JSON.stringify(body) };
 }
 
 async function yahooChart(symbolAX, range='3mo', interval='1d', timeoutMs=7000){
@@ -28,18 +23,8 @@ async function yahooChart(symbolAX, range='3mo', interval='1d', timeoutMs=7000){
   const y = await fetchJSON(url, timeoutMs);
   return y?.chart?.result?.[0] || null;
 }
-function pctChange(arr, n){
-  if(!arr||arr.length<=n) return null;
-  const a=arr[arr.length-1], b=arr[arr.length-1-n];
-  if(!isFinite(a)||!isFinite(b)||b===0) return null;
-  return (a-b)/b*100;
-}
-function stdev(arr){
-  if(!arr||arr.length<2) return null;
-  const m = arr.reduce((a,b)=>a+b,0)/arr.length;
-  const v = arr.reduce((a,b)=>a+(b-m)*(b-m),0)/(arr.length-1);
-  return Math.sqrt(v);
-}
+function pctChange(arr, n){ if(!arr||arr.length<=n) return null; const a=arr[arr.length-1], b=arr[arr.length-1-n]; if(!isFinite(a)||!isFinite(b)||b===0) return null; return (a-b)/b*100; }
+function stdev(arr){ if(!arr||arr.length<2) return null; const m=arr.reduce((a,b)=>a+b,0)/arr.length; const v=arr.reduce((a,b)=>a+(b-m)*(b-m),0)/(arr.length-1); return Math.sqrt(v); }
 function downsample(arr, step=2){ const out=[]; for(let i=Math.max(0,arr.length-90); i<arr.length; i+=step){ const v=arr[i]; if(v!=null) out.push(Number(v.toFixed(4))); } return out; }
 
 async function get90d(symbol){
