@@ -31,7 +31,7 @@
     function netTarget(entry, capital, profitPct){const {qty,buyFee,sellFee}=breakdown(capital, entry);if(qty<=0)return null;const requiredNet=Number(capital)*(Number(profitPct)/100);return Number(entry)+ (requiredNet + buyFee + sellFee)/qty}
     function useLocal(k,i){const [v,setV]=useState(()=>{try{const s=localStorage.getItem(k);return s?JSON.parse(s):i}catch{return i}});useEffect(()=>{try{localStorage.setItem(k,JSON.stringify(v))}catch{}},[v]);return [v,setV]}
 
-    function Header({ capital, setCapital, profitPct, setProfitPct }){
+    function Header({ capital, setCapital, profitPct, setProfitPct, onPing }){
       return (
         <header className="p-6">
           <h1 className="text-2xl md:text-3xl font-semibold">ASX Swing Trader <span className="text-violet-400">· top 3 picks</span></h1>
@@ -44,6 +44,7 @@
               <span className="muted">Profit % (net):</span>
               <input type="number" min="1" step="0.1" className="glass px-3 py-2 rounded-md w-28 text-slate-100" value={profitPct} onChange={e=>setProfitPct(Math.max(0,Number(e.target.value||0)))} />
             </div>
+            <button className="btn px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600" onClick={onPing}>Test API</button>
             <span className="muted text-xs">CommSec fees auto-applied · buy + sell</span>
           </div>
         </header>
@@ -126,9 +127,16 @@
     function App(){
       const [capital,setCapital]=useLocal('capital',1000);
       const [profitPct,setProfitPct]=useLocal('profitPct',7.5);
+      const onPing = async ()=>{
+        try{
+          const r = await fetch(`${API}?fn=pick3&mode=fast&t=${Date.now()}`);
+          const j = await r.json();
+          alert('API OK: ' + (j.note||JSON.stringify(j)).slice(0,140));
+        }catch(e){ alert('API error: '+e.message); }
+      }
       return (
         <div className="max-w-6xl mx-auto p-4 md:p-8 space-y-6">
-          <Header capital={capital} setCapital={setCapital} profitPct={profitPct} setProfitPct={setProfitPct} />
+          <Header capital={capital} setCapital={setCapital} profitPct={profitPct} setProfitPct={setProfitPct} onPing={onPing} />
           <Top3 capital={capital} profitPct={profitPct} />
         </div>
       );
