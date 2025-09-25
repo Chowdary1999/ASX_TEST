@@ -1,8 +1,11 @@
 // netlify/functions/market.js
-// Robust picker with multi-stage fallbacks: TE -> Yahoo, else Hardcoded ASX basket.
+// Yahoo-only data source: 90-day history & live quotes across an ASX universe.
+// Also computes features for AI to consume. No TE dependency.
 const https = require('https');
 
-function fetchJSON(url, timeoutMs=6000) {
+const UNIVERSE = ["BHP.AX", "CBA.AX", "CSL.AX", "NAB.AX", "WBC.AX", "ANZ.AX", "WES.AX", "WDS.AX", "FMG.AX", "MQG.AX", "TLS.AX", "WOW.AX", "TCL.AX", "QBE.AX", "RIO.AX", "BXB.AX", "GMG.AX", "ORG.AX", "ALL.AX", "WOR.AX", "SUN.AX", "COH.AX", "COL.AX", "APA.AX", "AMP.AX", "ARB.AX", "CWN.AX", "CWY.AX", "DMP.AX", "FLT.AX", "GPT.AX", "IAG.AX", "JHX.AX", "LLC.AX", "MPL.AX", "NHF.AX", "NXT.AX", "ORI.AX", "OSH.AX", "PME.AX", "QAN.AX", "REA.AX", "RHC.AX", "S32.AX", "SDF.AX", "SEK.AX", "SHL.AX", "SXY.AX", "TWE.AX", "VCX.AX", "WTC.AX", "WHC.AX", "MIN.AX", "PLS.AX", "LTR.AX", "LYC.AX", "IGO.AX", "CXO.AX", "RMD.AX", "PMV.AX", "CAR.AX", "CPU.AX", "BRG.AX", "SUL.AX", "SGP.AX", "SCG.AX", "EDV.AX", "EVN.AX", "NST.AX", "NCM.AX", "CHN.AX", "NIC.AX", "MP1.AX", "WEB.AX", "KGN.AX", "APX.AX", "XRO.AX", "ALU.AX", "DHG.AX", "A2M.AX"];
+
+function fetchJSON(url, timeoutMs=8000) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }, (res) => {
       let data=''; res.on('data', c => data += c);
@@ -15,117 +18,87 @@ function fetchJSON(url, timeoutMs=6000) {
 function json(body, status=200){
   return {
     statusCode: status,
-    headers: {
-      'Content-Type': 'application/json',
-      'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
-      'Pragma': 'no-cache',
-      'Expires': '0',
-      'Access-Control-Allow-Origin': '*'
-    },
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' },
     body: JSON.stringify(body)
   };
 }
 
-async function yahooChart(symbolAX, range='6mo', interval='1d', timeoutMs=6000){
+async function yahooChart(symbolAX, range='3mo', interval='1d', timeoutMs=7000){
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbolAX)}?interval=${interval}&range=${range}`;
-  return fetchJSON(url, timeoutMs).then(y=>y?.chart?.result?.[0]||null);
+  const y = await fetchJSON(url, timeoutMs);
+  return y?.chart?.result?.[0] || null;
 }
-function pctChange(closes, lookback){
-  if(!closes || closes.length<=lookback) return null;
-  const a = closes[closes.length-1], b = closes[closes.length-1-lookback];
+function pctChange(arr, n){
+  if(!arr||arr.length<=n) return null;
+  const a=arr[arr.length-1], b=arr[arr.length-1-n];
   if(!isFinite(a)||!isFinite(b)||b===0) return null;
   return (a-b)/b*100;
 }
-async function scoreWithYahoo(symbolAX, mcap, timeoutPer=2500){
-  const r = await yahooChart(symbolAX, '6mo', '1d', timeoutPer);
+function stdev(arr){
+  if(!arr||arr.length<2) return null;
+  const m = arr.reduce((a,b)=>a+b,0)/arr.length;
+  const v = arr.reduce((a,b)=>a+(b-m)*(b-m),0)/(arr.length-1);
+  return Math.sqrt(v);
+}
+function downsample(arr, step=2){ const out=[]; for(let i=Math.max(0,arr.length-90); i<arr.length; i+=step){ const v=arr[i]; if(v!=null) out.push(Number(v.toFixed(4))); } return out; }
+
+async function get90d(symbol){
+  const r = await yahooChart(symbol,'3mo','1d',7000);
   const closes = r?.indicators?.quote?.[0]?.close || [];
-  if (closes.length < 40) return null;
-  const last = closes[closes.length-1];
-  if (!isFinite(last) || last <= 0.05) return null;
-  const d1 = pctChange(closes,1)??0, d5 = pctChange(closes,5)??0, d20 = pctChange(closes,20)??0;
-  const score = 0.6*d1 + 0.3*d5 + 0.1*d20 - (mcap>5e9?1.25:(mcap>1e9?0.5:0));
-  return { entry:last, score };
+  const vols   = r?.indicators?.quote?.[0]?.volume || [];
+  if(closes.length < 45) return null;
+  const last = [...closes].reverse().find(v=>v!=null);
+  if(!isFinite(last)||last<=0.01) return null;
+  const d1=pctChange(closes,1)||0, d5=pctChange(closes,5)||0, d20=pctChange(closes,20)||0;
+  const sd20=stdev(closes.slice(-20))||0;
+  const vAvg = Math.round((vols.slice(-20).filter(v=>v!=null).reduce((a,b)=>a+b,0) / Math.max(1,vols.slice(-20).filter(v=>v!=null).length)) || 0);
+  const ds = downsample(closes,2); // ~45 points
+  const score = 0.6*d1 + 0.3*d5 + 0.1*d20;
+  return { symbol, name: symbol.replace('.AX',''), entry: last, d1, d5, d20, sd20, vAvg, closes90: ds, score };
 }
 
-const HARDCODED = [
-  'BHP.AX','CBA.AX','CSL.AX','NAB.AX','WBC.AX','ANZ.AX','WES.AX','WDS.AX','FMG.AX','MQG.AX',
-  'TLS.AX','WOW.AX','TCL.AX','QBE.AX','PLS.AX','RIO.AX','ALL.AX','BXB.AX','GMG.AX','ORG.AX'
-];
-
-async function buildPoolFromTE(mode){
-  try{
-    const te = await fetchJSON('https://api.tradingeconomics.com/markets/stocks/country/australia?c=guest:guest&f=json', 6000);
-    const rows = (te||[]).map(r => ({
-      symbol: (r.Symbol || r.symbol || '').toUpperCase(),
-      name: r.Name || r.name || '',
-      mcap: r.MarketCap ?? r.market_cap ?? 0,
-      last: r.Last ?? r.last ?? null,
-      d: {
-        day: r.DailyPercentualChange ?? r.daily_percentual_change ?? 0,
-        week: r.WeeklyPercentualChange ?? r.weekly_percentual_change ?? 0,
-        month: r.MonthlyPercentualChange ?? r.monthly_percentual_change ?? 0,
-      }
-    })).filter(r => r.symbol && r.symbol.endsWith('.AX'));
-    const limit = mode==='full' ? 50 : 20;
-    return rows.sort((a,b)=>(b.mcap||0)-(a.mcap||0)).slice(0, limit);
-  }catch(e){
-    return null; // TE down
-  }
-}
-
-async function pick3Robust(mode='fast'){
-  const deadline = Date.now() + (mode==='full' ? 9000 : 6000);
-  let pool = await buildPoolFromTE(mode);
-  let note = 'yahoo momentum via TE pool';
-
-  if(!pool){
-    // Fallback to hardcoded blue-chip basket if TE is unreachable
-    note = 'yahoo momentum via hardcoded basket';
-    pool = HARDCODED.map(s => ({ symbol: s, name: s.replace('.AX',''), mcap: 1e9 }));
-  }
-
+async function buildCandidates(limit=80){
   const out = [];
   let idx = 0;
+  const pool = UNIVERSE.slice(0, limit);
   async function worker(){
-    while(idx < pool.length && Date.now() < deadline && out.length < 12){
-      const row = pool[idx++];
-      try{
-        const r = await scoreWithYahoo(row.symbol, row.mcap||1e9, 2000);
-        if (r) out.push({ symbol:row.symbol, name:row.name, entry:r.entry, score:r.score });
-      }catch{}
+    while(idx < pool.length && out.length < limit){
+      const s = pool[idx++];
+      try{ const row = await get90d(s); if(row) out.push(row); }catch{}
     }
   }
-  await Promise.all([worker(),worker(),worker(),worker()]);
-
-  if (out.length < 3){
-    // Fallback to change deltas if available; else last resort: take last prices only
-    if (pool[0]?.d){
-      const fallback = pool.map(row=>{
-        const entry = Number(row.last) || 0;
-        const score = (row.d.day||0) + 0.5*(row.d.week||0) + 0.25*(row.d.month||0) - (row.mcap>5e9?1.25:(row.mcap>1e9?0.5:0));
-        return { symbol:row.symbol, name:row.name, entry, score };
-      }).filter(r => r.entry>0.05);
-      fallback.sort((a,b)=> (b.score||-1e9)-(a.score||-1e9));
-      const picks = fallback.slice(0,3).map((t,i)=>({ ...t, rank:i+1 }));
-      return { picks, asOf:new Date().toISOString(), note: note + ' (fallback: TE deltas)' };
-    }else{
-      const picks = HARDCODED.slice(0,3).map((s,i)=>({ symbol:s, name:s.replace('.AX',''), entry: 1.00, score: 0, rank:i+1 }));
-      return { picks, asOf:new Date().toISOString(), note: note + ' (last resort)' };
-    }
-  }
-
-  out.sort((a,b)=> (b.score||-1e9)-(a.score||-1e9));
-  const picks = out.slice(0,3).map((t,i)=>({ ...t, rank:i+1 }));
-  return { picks, asOf:new Date().toISOString(), note };
+  await Promise.all([worker(),worker(),worker(),worker(),worker()]);
+  out.sort((a,b)=>(b.score||-1e9)-(a.score||-1e9));
+  return out;
 }
 
 exports.handler = async (event) => {
   try {
     const q = event.queryStringParameters || {};
-    if ((q.fn||'') !== 'pick3') return json({ error: 'Unsupported fn. Use fn=pick3' }, 400);
-    const mode = q.mode || 'fast';
-    const result = await pick3Robust(mode);
-    return json(result);
+    const fn = q.fn || 'candidates';
+    if (fn === 'quote'){
+      const sym = (q.symbol||'').trim().toUpperCase();
+      const use = sym.includes('.AX')? sym : `${sym}.AX`;
+      const r = await yahooChart(use,'1mo','1d',6000);
+      const closes = r?.indicators?.quote?.[0]?.close || [];
+      const last = [...closes].reverse().find(v=>v!=null);
+      return json({ symbol: use, last });
+    }
+    if (fn === 'history'){
+      const sym = (q.symbol||'').trim().toUpperCase();
+      const use = sym.includes('.AX')? sym : `${sym}.AX`;
+      const r = await yahooChart(use,'3mo','1d',7000);
+      const closes = r?.indicators?.quote?.[0]?.close || [];
+      return json({ symbol: use, closes });
+    }
+    if (fn === 'candidates'){
+      const cands = await buildCandidates(80);
+      return json({ candidates: cands, asOf: new Date().toISOString() });
+    }
+    if (fn === 'universe'){
+      return json({ symbols: UNIVERSE });
+    }
+    return json({ error: 'Unsupported fn' }, 400);
   } catch (e) {
     return json({ error: e.message }, 500);
   }
